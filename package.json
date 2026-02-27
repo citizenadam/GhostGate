@@ -1,0 +1,27 @@
+{
+    "$schema": "https://json.schemastore.org/package.json",
+    "name": "ghostgate-router",
+    "version": "1.0.0",
+    "type": "module",
+    "description": "Native OpenCode plugin for zero-process MCP routing and dynamic context optimization",
+    "main": "./dist/index.js",
+    "types": "./dist/index.d.ts",
+    "scripts": {
+        "clean": "rm -rf dist",
+        "build": "npm run clean && tsc",
+        "dev": "opencode plugin dev",
+        "typecheck": "tsc --noEmit",
+        "format": "prettier --write ."
+    },
+    "dependencies": {
+        "@anthropic-ai/tokenizer": "^0.0.4",
+        "@opencode-ai/sdk": "^1.1.48",
+        "zod": "^4.3.6"
+    },
+    "devDependencies": {
+        "@opencode-ai/plugin": "^1.1.49",
+        "@types/node": "^25.1.0",
+        "typescript": "^5.9.3",
+        "tsx": "^4.21.0"
+    }
+}
