@@ -4,18 +4,42 @@ import { tool, fs } from "@opencode-ai/plugin";
 
 /**
  * GhostGate: Zero-Process Context Orchestrator & Pruning Engine
- * Inherits state management and transformation hooks from DCP architecture.
+ * * Features:
+ * - Automated Environment Setup: Self-creates registry directories.
+ * - Dynamic Context Pruning: Injects tool schemas only when active.
+ * - In-Process Execution: Zero external Node.js dependencies.
  */
-const GhostGate: Plugin = (async (ctx) => {
-    // 1. Initial State & Configuration
+export const GhostGate: Plugin = (async (ctx) => {
+    // 1. AUTOMATED ENVIRONMENT SETUP
     const REGISTRY_PATH = './.opencode/ghostgate/registry';
+    
+    try {
+        const stats = await fs.stat(REGISTRY_PATH).catch(() => null);
+        if (!stats) {
+            // Recursive creation mimics 'mkdir -p'
+            await fs.mkdir(REGISTRY_PATH, { recursive: true });
+            const welcomeSchema = {
+                name: "example_tool",
+                description: "A placeholder tool for GhostGate.",
+                parameters: { input: "string" }
+            };
+            await fs.writeFile(
+                `${REGISTRY_PATH}/example.json`, 
+                JSON.stringify(welcomeSchema, null, 2)
+            );
+        }
+    } catch (err) {
+        // Log setup errors to the OpenCode console
+        console.error("[GhostGate] Initialization Error:", err);
+    }
+
+    // 2. SESSION STATE
     const state = {
         activeTools: new Set<string>(),
-        lastQuery: "",
-        sessionID: ""
+        sessionID: ctx.directory
     };
 
-    // 2. Comprehensive Helper: Registry Scoping
+    // 3. REGISTRY HELPER
     const getRegistry = async () => {
         try {
             const files = await fs.readdir(REGISTRY_PATH);
@@ -23,8 +47,8 @@ const GhostGate: Plugin = (async (ctx) => {
             for (const file of files) {
                 if (file.endsWith('.json')) {
                     const content = await fs.readFile(`${REGISTRY_PATH}/${file}`, 'utf-8');
-                    const schema = JSON.parse(content);
-                    registry[schema.name] = schema;
+                    const parsed = JSON.parse(content);
+                    registry[parsed.name] = parsed;
                 }
             }
             return registry;
@@ -32,81 +56,90 @@ const GhostGate: Plugin = (async (ctx) => {
     };
 
     return {
-        // 3. Lifecycle Hooks (DCP Pattern)
-        // Intercepts the system prompt to dynamically inject active tool schemas
+        // 4. CONTEXT PRUNING (DCP PATTERN)
+        // Dynamically modifies the system prompt to include only 'Activated' tools
         "experimental.chat.system.transform": async (input: { prompt: string }) => {
             if (state.activeTools.size === 0) return input.prompt;
             
             const registry = await getRegistry();
             const activeSchemas = Array.from(state.activeTools)
-                .map(name => JSON.stringify(registry[name]))
-                .join("\n");
+                .filter(name => registry[name])
+                .map(name => `Tool: ${name}\nSchema: ${JSON.stringify(registry[name])}`)
+                .join("\n\n");
 
-            return `${input.prompt}\n\n[GhostGate Active Tools]:\n${activeSchemas}`;
+            return `${input.prompt}\n\n[GHOSTGATE ACTIVE REGISTRY]:\n${activeSchemas}`;
         },
 
-        // 4. GhostGate Tools
+        // 5. NATIVE CONFIG MUTATION
+        // Promotes GhostGate tools to primary status automatically
+        config: async (opencodeConfig) => {
+            const ghostCoreTools = ["search_ghost_tools", "activate_ghost_tool", "execute_ghost_action", "purge_ghost_context"];
+            opencodeConfig.experimental = {
+                ...opencodeConfig.experimental,
+                primary_tools: [
+                    ...new Set([...(opencodeConfig.experimental?.primary_tools ?? []), ...ghostCoreTools])
+                ]
+            };
+        },
+
+        // 6. GHOSTGATE CORE TOOLS
         tool: {
             search_ghost_tools: tool({
-                description: 'Search internal registry. Minimizes initial context bloat.',
-                args: { query: tool.schema.string() },
+                description: 'Search the internal registry for specialized tools while minimizing initial context.',
+                args: { query: tool.schema.string().describe('Search term for tool names or descriptions') },
                 async execute({ query }) {
-                    state.lastQuery = query;
                     const registry = await getRegistry();
-                    const matches = Object.keys(registry).filter(n => n.includes(query));
+                    const matches = Object.keys(registry).filter(n => 
+                        n.toLowerCase().includes(query.toLowerCase()) || 
+                        registry[n].description.toLowerCase().includes(query.toLowerCase())
+                    );
                     return matches.length > 0 
-                        ? `Found: ${matches.join(', ')}. Use 'activate_ghost_tool' to load.` 
-                        : "No matching tools found.";
+                        ? `Found matches: ${matches.join(', ')}. Use 'activate_ghost_tool' to load a schema.` 
+                        : "No matching tools found in registry.";
                 }
             }),
 
             activate_ghost_tool: tool({
-                description: 'Injects a tool schema into the current session state (Context Injection).',
-                args: { toolName: tool.schema.string() },
+                description: 'Loads a tool schema into the active session context.',
+                args: { toolName: tool.schema.string().describe('The specific tool name to activate') },
                 async execute({ toolName }) {
                     const registry = await getRegistry();
-                    if (!registry[toolName]) return "Error: Tool not in registry.";
+                    if (!registry[toolName]) return `Error: '${toolName}' not found.`;
                     
                     state.activeTools.add(toolName);
-                    return `Tool '${toolName}' activated. Its schema is now part of your system instructions.`;
+                    return `Success: ${toolName} schema injected into system prompt. You can now use it via 'execute_ghost_action'.`;
                 }
             }),
 
             execute_ghost_action: tool({
-                description: 'Executes a verified ghost tool action.',
+                description: 'Executes a validated action for an activated ghost tool.',
                 args: { 
                     toolName: tool.schema.string(),
-                    parameters: tool.schema.any() 
+                    parameters: tool.schema.any().describe('Arguments as defined by the tool schema')
                 },
                 async execute({ toolName, parameters }) {
                     if (!state.activeTools.has(toolName)) {
-                        return `Error: Tool '${toolName}' must be activated before execution.`;
+                        return `Error: Tool '${toolName}' is not activated. Use 'activate_ghost_tool' first.`;
                     }
                     
-                    // Comprehensive Security Validation
-                    // Here you would integrate DCP-style logic for path scrubbing
-                    return { status: "success", tool: toolName, data: parameters };
+                    // Logic: Implement specific internal handlers or proxy to system APIs here.
+                    return {
+                        status: "success",
+                        tool: toolName,
+                        results: "Action simulated successfully in-process.",
+                        timestamp: new Date().toISOString()
+                    };
                 }
             }),
 
-            deactivate_all_tools: tool({
-                description: 'Purges all ghost tool schemas from context to save tokens.',
+            purge_ghost_context: tool({
+                description: 'Deactivates all ghost tools to reset context and save tokens.',
                 args: {},
                 async execute() {
                     state.activeTools.clear();
-                    return "All ghost tools deactivated. Context pruned.";
+                    return "Registry context purged. All ghost tools moved to cold storage.";
                 }
             })
-        },
-
-        // 5. Native Config Mutation (DCP Pattern)
-        config: async (opencodeConfig) => {
-            // Automatically promote GhostGate tools to primary_tools for easier LLM access
-            const toolsToAdd = ["search_ghost_tools", "activate_ghost_tool", "execute_ghost_action"];
-            opencodeConfig.experimental = {
-                ...opencodeConfig.experimental,
-                primary_tools: [...(opencodeConfig.experimental?.primary_tools ?? []), ...toolsToAdd]
-            };
         }
     };
 }) satisfies Plugin;
