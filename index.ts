@@ -1,5 +1,7 @@
 import type { Plugin } from "@opencode-ai/plugin";
-import { tool, fs } from "@opencode-ai/plugin";
+import { tool } from "@opencode-ai/plugin";
+import { promises as fs } from "fs";
+import { cwd } from "process";
 import {
     createTokenMetrics,
     estimateTokenCount,
@@ -9,10 +11,20 @@ import {
     type TokenMetrics,
     type GhostGateState
 } from "./lib/commands/status.js";
+import { getConfig, resolveRegistryPath } from "./lib/config.js";
 
 export const GhostGate: Plugin = (async (ctx) => {
-    const REGISTRY_PATH = './.opencode/ghostgate/registry';
+    const config = getConfig(ctx);
+    
+    if (!config.enabled) {
+        return {};
+    }
+
     const startTime = new Date();
+    const workingDirectory = ctx.directory ?? cwd();
+    const REGISTRY_PATH = config.registry.enabled 
+        ? resolveRegistryPath(config, workingDirectory)
+        : "";
     
     const state: GhostGateState = {
         activeTools: new Set<string>(),
@@ -22,22 +34,28 @@ export const GhostGate: Plugin = (async (ctx) => {
 
     const prunedResults: Map<string, { original: string; pruned: string; tokensSaved: number }> = new Map();
 
-    try {
-        const stats = await fs.stat(REGISTRY_PATH).catch(() => null);
-        if (!stats) {
-            await fs.mkdir(REGISTRY_PATH, { recursive: true });
-            const example = {
-                name: "sys_info",
-                description: "Retrieves comprehensive system metrics.",
-                parameters: { detail_level: "string" }
-            };
-            await fs.writeFile(`${REGISTRY_PATH}/sys_info.json`, JSON.stringify(example, null, 2));
+    if (config.registry.enabled && REGISTRY_PATH) {
+        try {
+            const stats = await fs.stat(REGISTRY_PATH).catch(() => null);
+            if (!stats) {
+                await fs.mkdir(REGISTRY_PATH, { recursive: true });
+                const example = {
+                    name: "sys_info",
+                    description: "Retrieves comprehensive system metrics.",
+                    parameters: { detail_level: "string" }
+                };
+                await fs.writeFile(`${REGISTRY_PATH}/sys_info.json`, JSON.stringify(example, null, 2));
+            }
+        } catch (err) {
+            if (config.debug) {
+                console.error("[GhostGate] Setup Failed:", err);
+            }
         }
-    } catch (err) {
-        console.error("[GhostGate] Setup Failed:", err);
     }
 
     const getRegistry = async (): Promise<Record<string, unknown>> => {
+        if (!config.registry.enabled || !REGISTRY_PATH) return {};
+        
         try {
             const files = await fs.readdir(REGISTRY_PATH);
             const registry: Record<string, unknown> = {};
@@ -53,9 +71,13 @@ export const GhostGate: Plugin = (async (ctx) => {
     };
 
     const pruneToolResult = (result: string, toolName: string): { pruned: string; tokensSaved: number } => {
+        if (!config.pruning.enabled) {
+            return { pruned: result, tokensSaved: 0 };
+        }
+
         const originalTokens = estimateTokenCount(result);
         
-        if (originalTokens < 100) {
+        if (originalTokens < config.pruning.minTokens) {
             return { pruned: result, tokensSaved: 0 };
         }
 
@@ -77,7 +99,7 @@ export const GhostGate: Plugin = (async (ctx) => {
             });
         }
 
-        const maxTokens = 2000;
+        const maxTokens = config.pruning.maxTokens;
         const maxChars = maxTokens * 4;
         if (pruned.length > maxChars) {
             const truncated = pruned.slice(0, maxChars);
@@ -90,13 +112,18 @@ export const GhostGate: Plugin = (async (ctx) => {
         return { pruned, tokensSaved };
     };
 
-    return {
-        "command.execute.before": async (input) => {
+    const hooks: Record<string, unknown> = {};
+
+    if (config.commands.enabled) {
+        hooks["command.execute.before"] = async (input: { command: string; arguments: string }) => {
             if (input.command === "ghostgate") {
-                const subCommand = input.args[0];
+                const args = input.arguments.split(" ");
+                const subCommand = args[0];
                 
                 if (subCommand === "status") {
-                    const files = await fs.readdir(REGISTRY_PATH).catch(() => []);
+                    const files = config.registry.enabled 
+                        ? await fs.readdir(REGISTRY_PATH).catch(() => [])
+                        : [];
                     const registry = await getRegistry();
                     const inactiveCount = Object.keys(registry).length - state.activeTools.size;
                     state.tokenMetrics.estimatedTokensSaved += inactiveCount * 200;
@@ -104,7 +131,7 @@ export const GhostGate: Plugin = (async (ctx) => {
                     const report = await generateStatusReport(state, REGISTRY_PATH, files.length, startTime);
                     const output = formatStatusOutput(report);
                     
-                    return { status: "success", output, halt: true };
+                    return { parts: [{ type: "text", text: output }] };
                 }
                 
                 if (subCommand === "metrics") {
@@ -122,7 +149,7 @@ export const GhostGate: Plugin = (async (ctx) => {
                         "╚══════════════════════════════════════════════════════════════╝"
                     ].join("\n");
                     
-                    return { status: "success", output, halt: true };
+                    return { parts: [{ type: "text", text: output }] };
                 }
                 
                 if (subCommand === "reset") {
@@ -130,146 +157,158 @@ export const GhostGate: Plugin = (async (ctx) => {
                     state.tokenMetrics = createTokenMetrics();
                     prunedResults.clear();
                     
-                    return { status: "success", output: "GhostGate state reset complete.", halt: true };
+                    return { parts: [{ type: "text", text: "GhostGate state reset complete." }] };
                 }
             }
-        },
+        };
+    }
 
-        "tool.execute.after": async (input) => {
-            state.tokenMetrics.toolCallsIntercepted++;
+    hooks["tool.execute.after"] = async (input: { tool: string; sessionID: string; callID: string; args: unknown }, output: { title: string; output: string; metadata: unknown }) => {
+        state.tokenMetrics.toolCallsIntercepted++;
+        
+        const toolName = input.tool;
+        const result = output.output;
+        
+        if (typeof result === 'string' && result.length > 500) {
+            const { pruned, tokensSaved } = pruneToolResult(result, toolName);
             
-            const toolName = input.tool;
-            const result = input.result;
-            
-            if (typeof result === 'string' && result.length > 500) {
-                const { pruned, tokensSaved } = pruneToolResult(result, toolName);
+            if (tokensSaved > 0) {
+                prunedResults.set(`${toolName}-${Date.now()}`, {
+                    original: result,
+                    pruned,
+                    tokensSaved
+                });
                 
-                if (tokensSaved > 0) {
-                    prunedResults.set(`${toolName}-${Date.now()}`, {
-                        original: result,
-                        pruned,
-                        tokensSaved
-                    });
-                    
-                    state.tokenMetrics.estimatedTokensSaved += tokensSaved;
-                    state.tokenMetrics.contextPrunes++;
-                }
+                state.tokenMetrics.estimatedTokensSaved += tokensSaved;
+                state.tokenMetrics.contextPrunes++;
+                output.output = pruned;
             }
-        },
+        }
+    };
 
-        "experimental.chat.system.transform": async (input: { prompt: string }) => {
-            if (state.activeTools.size === 0) return input.prompt;
-            
-            const registry = await getRegistry();
-            const activeSchemas = Array.from(state.activeTools)
-                .filter(name => registry[name])
-                .map(name => {
-                    const schema = registry[name];
-                    state.tokenMetrics.schemasInjected++;
-                    return `[TOOL_DEFINITION]: ${name}\n${JSON.stringify(schema)}`;
-                })
-                .join("\n\n");
+    hooks["experimental.chat.system.transform"] = async (_input: unknown, output: { system: string[] }) => {
+        if (state.activeTools.size === 0) return;
+        
+        const registry = await getRegistry();
+        const activeSchemas = Array.from(state.activeTools)
+            .filter(name => registry[name])
+            .map(name => {
+                const schema = registry[name];
+                state.tokenMetrics.schemasInjected++;
+                return `[TOOL_DEFINITION]: ${name}\n${JSON.stringify(schema)}`;
+            })
+            .join("\n\n");
 
-            return `${input.prompt}\n\n[GHOSTGATE ACTIVE TOOLS]:\n${activeSchemas}`;
-        },
+        output.system.push(`[GHOSTGATE ACTIVE TOOLS]:\n${activeSchemas}`);
+    };
 
-        "experimental.session.compacting": async (input, output) => {
-            output.context.push(`
+    hooks["experimental.session.compacting"] = async (_input: unknown, output: { context: string[] }) => {
+        output.context.push(`
 [GhostGate Context Summary]
 - Active Tools: ${Array.from(state.activeTools).join(', ') || 'none'}
 - Tokens Saved This Session: ${state.tokenMetrics.estimatedTokensSaved}
 - Tool Calls Intercepted: ${state.tokenMetrics.toolCallsIntercepted}
 - Context Prunes: ${state.tokenMetrics.contextPrunes}
 [End GhostGate Context]
-            `);
-        },
+        `);
+    };
 
-        config: async (opencodeConfig) => {
-            opencodeConfig.command ??= {};
-            opencodeConfig.command["ghostgate"] = {
+    hooks["config"] = async (opencodeConfig: Record<string, unknown>) => {
+        if (config.commands.enabled) {
+            (opencodeConfig.command as Record<string, unknown>) ??= {};
+            (opencodeConfig.command as Record<string, unknown>)["ghostgate"] = {
                 description: "Context management and diagnostics for GhostGate.",
                 template: "usage: /ghostgate [status|metrics|reset]"
             };
+        }
 
+        if (config.registry.enabled) {
             const core = ["search_ghost_tools", "activate_ghost_tool", "execute_ghost_action", "purge_ghost_context", "ghostgate_metrics"];
             opencodeConfig.experimental = {
-                ...opencodeConfig.experimental,
-                primary_tools: [...new Set([...(opencodeConfig.experimental?.primary_tools ?? []), ...core])]
+                ...opencodeConfig.experimental as Record<string, unknown>,
+                primary_tools: [...new Set([...((opencodeConfig.experimental as Record<string, unknown>)?.primary_tools ?? []) as string[], ...core])]
             };
-        },
-
-        tool: {
-            search_ghost_tools: tool({
-                description: 'Search the GhostGate registry for tools. Minimizes initial token bloat.',
-                args: { query: tool.schema.string() },
-                async execute({ query }) {
-                    const registry = await getRegistry();
-                    const matches = Object.keys(registry).filter(n => n.includes(query));
-                    return matches.length > 0 
-                        ? `Matches found: ${matches.join(', ')}. Use 'activate_ghost_tool' to load a specific schema.`
-                        : "No matching tools found in registry.";
-                }
-            }),
-
-            activate_ghost_tool: tool({
-                description: 'Injects a specific tool schema into the active system context.',
-                args: { toolName: tool.schema.string() },
-                async execute({ toolName }) {
-                    const registry = await getRegistry();
-                    if (!registry[toolName]) return `Error: Tool '${toolName}' not found.`;
-                    
-                    state.activeTools.add(toolName);
-                    state.tokenMetrics.toolsActivated++;
-                    
-                    const schema = registry[toolName];
-                    const tokens = estimateSchemaTokens(schema as Record<string, unknown>);
-                    state.tokenMetrics.estimatedTokensSaved -= tokens;
-                    
-                    return `Activated: ${toolName}. Schema is now visible in your system prompt.`;
-                }
-            }),
-
-            execute_ghost_action: tool({
-                description: 'Executes a verified ghost tool action using in-process logic.',
-                args: { 
-                    toolName: tool.schema.string(),
-                    parameters: tool.schema.any()
-                },
-                async execute({ toolName, parameters }) {
-                    if (!state.activeTools.has(toolName)) return `Error: Activate '${toolName}' first.`;
-                    
-                    return { status: "success", tool: toolName, output: "Action simulated successfully.", data: parameters };
-                }
-            }),
-
-            purge_ghost_context: tool({
-                description: 'Clears all activated tool schemas to reset context and save tokens.',
-                args: {},
-                async execute() {
-                    const count = state.activeTools.size;
-                    state.tokenMetrics.estimatedTokensSaved += count * 200;
-                    state.activeTools.clear();
-                    state.tokenMetrics.contextPrunes++;
-                    
-                    return `GhostGate context purged. ${count} tool schemas removed from system prompt.`;
-                }
-            }),
-
-            ghostgate_metrics: tool({
-                description: 'Display current GhostGate token savings metrics.',
-                args: {},
-                async execute() {
-                    const m = state.tokenMetrics;
-                    return [
-                        `Tools Activated: ${m.toolsActivated}`,
-                        `Schemas Injected: ${m.schemasInjected}`,
-                        `Est. Tokens Saved: ${m.estimatedTokensSaved}`,
-                        `Calls Intercepted: ${m.toolCallsIntercepted}`,
-                        `Context Prunes: ${m.contextPrunes}`
-                    ].join('\n');
-                }
-            })
         }
+    };
+
+    const tools: Record<string, unknown> = {};
+
+    if (config.registry.enabled) {
+        tools["search_ghost_tools"] = tool({
+            description: 'Search the GhostGate registry for tools. Minimizes initial token bloat.',
+            args: { query: tool.schema.string() },
+            async execute({ query }: { query: string }) {
+                const registry = await getRegistry();
+                const matches = Object.keys(registry).filter(n => n.includes(query));
+                return matches.length > 0 
+                    ? `Matches found: ${matches.join(', ')}. Use 'activate_ghost_tool' to load a specific schema.`
+                    : "No matching tools found in registry.";
+            }
+        });
+
+        tools["activate_ghost_tool"] = tool({
+            description: 'Injects a specific tool schema into the active system context.',
+            args: { toolName: tool.schema.string() },
+            async execute({ toolName }: { toolName: string }) {
+                const registry = await getRegistry();
+                if (!registry[toolName]) return `Error: Tool '${toolName}' not found.`;
+                
+                state.activeTools.add(toolName);
+                state.tokenMetrics.toolsActivated++;
+                
+                const schema = registry[toolName];
+                const tokens = estimateSchemaTokens(schema as Record<string, unknown>);
+                state.tokenMetrics.estimatedTokensSaved -= tokens;
+                
+                return `Activated: ${toolName}. Schema is now visible in your system prompt.`;
+            }
+        });
+
+        tools["execute_ghost_action"] = tool({
+            description: 'Executes a verified ghost tool action using in-process logic.',
+            args: { 
+                toolName: tool.schema.string(),
+                parameters: tool.schema.any()
+            },
+            async execute({ toolName, parameters }: { toolName: string; parameters: unknown }) {
+                if (!state.activeTools.has(toolName)) return `Error: Activate '${toolName}' first.`;
+                
+                return `Action executed successfully for ${toolName}. Parameters: ${JSON.stringify(parameters)}`;
+            }
+        });
+
+        tools["purge_ghost_context"] = tool({
+            description: 'Clears all activated tool schemas to reset context and save tokens.',
+            args: {},
+            async execute() {
+                const count = state.activeTools.size;
+                state.tokenMetrics.estimatedTokensSaved += count * 200;
+                state.activeTools.clear();
+                state.tokenMetrics.contextPrunes++;
+                
+                return `GhostGate context purged. ${count} tool schemas removed from system prompt.`;
+            }
+        });
+
+        tools["ghostgate_metrics"] = tool({
+            description: 'Display current GhostGate token savings metrics.',
+            args: {},
+            async execute() {
+                const m = state.tokenMetrics;
+                return [
+                    `Tools Activated: ${m.toolsActivated}`,
+                    `Schemas Injected: ${m.schemasInjected}`,
+                    `Est. Tokens Saved: ${m.estimatedTokensSaved}`,
+                    `Calls Intercepted: ${m.toolCallsIntercepted}`,
+                    `Context Prunes: ${m.contextPrunes}`
+                ].join('\n');
+            }
+        });
+    }
+
+    return {
+        ...hooks,
+        tool: Object.keys(tools).length > 0 ? tools : undefined
     };
 }) satisfies Plugin;
 

@@ -1,0 +1,86 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "GhostGate Configuration",
+  "description": "Configuration for GhostGate - Native zero-process context orchestrator plugin for OpenCode",
+  "type": "object",
+  "properties": {
+    "$schema": {
+      "type": "string",
+      "description": "JSON Schema reference for IDE support"
+    },
+    "enabled": {
+      "type": "boolean",
+      "default": true,
+      "description": "Enable or disable the plugin"
+    },
+    "debug": {
+      "type": "boolean",
+      "default": false,
+      "description": "Enable debug logging"
+    },
+    "registry": {
+      "type": "object",
+      "description": "Registry configuration",
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "Enable or disable the registry system"
+        },
+        "path": {
+          "type": "string",
+          "default": "./.opencode/ghostgate/registry",
+          "description": "Path to the registry directory (relative to project or absolute)"
+        }
+      }
+    },
+    "pruning": {
+      "type": "object",
+      "description": "Pruning configuration",
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "Enable automatic tool result pruning"
+        },
+        "maxTokens": {
+          "type": "number",
+          "default": 2000,
+          "description": "Maximum tokens for pruned results"
+        },
+        "minTokens": {
+          "type": "number",
+          "default": 100,
+          "description": "Minimum token count before pruning is applied"
+        }
+      }
+    },
+    "metrics": {
+      "type": "object",
+      "description": "Metrics configuration",
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "Enable metrics tracking"
+        },
+        "showInStatus": {
+          "type": "boolean",
+          "default": true,
+          "description": "Show metrics in status command"
+        }
+      }
+    },
+    "commands": {
+      "type": "object",
+      "description": "Commands configuration",
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "Enable /ghostgate commands"
+        }
+      }
+    }
+  }
+}
